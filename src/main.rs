@@ -39,15 +39,19 @@ async fn list_all_repos(configuration: &Config) -> Result<Vec<Repository>, Clien
         )
         .await?
         .body;
+    tracing::info!("Found {} repos", repos.len());
     Ok(repos)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let subscriber = get_subscriber("github-backup".into(), "info".into(), std::io::stdout);
+    let subscriber = get_subscriber(
+        "github-backup".into(),
+        "info,reqwest_tracing=warn".into(),
+        std::io::stdout,
+    );
     init_subscriber(subscriber);
     let configuration = get_configuration().expect("Failed to read configuration.");
     let repos = list_all_repos(&configuration).await?;
-    println!("{} repos", repos.len());
     Ok(())
 }
