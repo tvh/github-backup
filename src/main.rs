@@ -1,14 +1,12 @@
+mod telemetry;
+
+use crate::telemetry::{get_subscriber, init_subscriber};
 use std::error::Error;
 
-use octorust::{
-    auth::Credentials,
-    repos::Repos,
-    types::{MinimalRepository, Repository},
-    Client, ClientError,
-};
+use octorust::{auth::Credentials, types::Repository, Client, ClientError};
 use secrecy::{ExposeSecret, Secret};
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
 struct Config {
     pub token: Secret<String>,
     pub directory: String,
@@ -22,6 +20,7 @@ fn get_configuration() -> Result<Config, config::ConfigError> {
     settings.try_deserialize::<Config>()
 }
 
+#[tracing::instrument(name = "Fetching all repos for user")]
 async fn list_all_repos(configuration: &Config) -> Result<Vec<Repository>, ClientError> {
     let github = Client::new(
         String::from("tvh/github-backup"),
@@ -45,6 +44,8 @@ async fn list_all_repos(configuration: &Config) -> Result<Vec<Repository>, Clien
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let subscriber = get_subscriber("github-backup".into(), "info".into(), std::io::stdout);
+    init_subscriber(subscriber);
     let configuration = get_configuration().expect("Failed to read configuration.");
     let repos = list_all_repos(&configuration).await?;
     println!("{} repos", repos.len());
