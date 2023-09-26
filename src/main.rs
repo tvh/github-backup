@@ -1,12 +1,16 @@
 mod telemetry;
 
 use crate::telemetry::{get_subscriber, init_subscriber};
-use std::error::Error;
+use std::{error::Error, path::Path, sync::Arc};
 
 use octorust::{auth::Credentials, types::Repository, Client, ClientError};
 use secrecy::{ExposeSecret, Secret};
+use tokio::{
+    sync::Semaphore,
+    task::{spawn_blocking, JoinError},
+};
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, Clone)]
 struct Config {
     pub token: Secret<String>,
     pub directory: String,
@@ -43,6 +47,47 @@ async fn list_all_repos(configuration: &Config) -> Result<Vec<Repository>, Clien
     Ok(repos)
 }
 
+#[tracing::instrument(name = "Cloning repository", skip(repo), fields(repo=repo.full_name))]
+fn clone_repo(configuration: Config, repo: &Repository) -> Result<(), git2::Error> {
+    let root_dir = Path::new(configuration.directory.as_str());
+    let repo_path = root_dir.join(repo.full_name.as_str());
+    let git_repo = if repo_path.exists() {
+        git2::Repository::open(repo_path)?
+    } else {
+        let git_repo = git2::Repository::init_bare(repo_path)?;
+        git_repo.remote_set_url("origin", repo.html_url.as_str())?;
+        git_repo
+    };
+
+    git_repo.find_remote("origin")?.fetch(&[], None, None)?;
+
+    Ok(())
+}
+
+#[tracing::instrument(name = "Cloning repositories", skip(repos))]
+async fn clone_repos(configuration: &Config, repos: Vec<Repository>) -> Result<(), Box<dyn Error>> {
+    let semaphore = Arc::new(Semaphore::new(1));
+    let mut join_handles = Vec::new();
+    for repo in repos {
+        let permit = semaphore.clone().acquire_owned().await?;
+        let configuration = configuration.clone();
+        join_handles.push(spawn_blocking(move || {
+            let res = clone_repo(configuration, &repo);
+
+            // explicitly own `permit` in the task
+            drop(permit);
+
+            res
+        }));
+    }
+
+    for handle in join_handles {
+        handle.await??;
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let subscriber = get_subscriber(
@@ -53,5 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     init_subscriber(subscriber);
     let configuration = get_configuration().expect("Failed to read configuration.");
     let repos = list_all_repos(&configuration).await?;
+
+    clone_repos(&configuration, repos).await?;
     Ok(())
 }
