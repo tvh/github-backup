@@ -59,14 +59,16 @@ fn clone_repo(configuration: Config, repo: &Repository) -> Result<(), git2::Erro
         git_repo
     };
 
-    git_repo.find_remote("origin")?.fetch(&[], None, None)?;
+    git_repo
+        .find_remote("origin")?
+        .fetch(&["+refs/heads/*"], None, None)?;
 
     Ok(())
 }
 
 #[tracing::instrument(name = "Cloning repositories", skip(repos))]
 async fn clone_repos(configuration: &Config, repos: Vec<Repository>) -> Result<(), Box<dyn Error>> {
-    let semaphore = Arc::new(Semaphore::new(1));
+    let semaphore = Arc::new(Semaphore::new(10));
     let mut join_handles = Vec::new();
     for repo in repos {
         let permit = semaphore.clone().acquire_owned().await?;
