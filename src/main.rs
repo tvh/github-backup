@@ -95,7 +95,9 @@ fn clone_repo(configuration: Config, user: String, repo: &Repository) -> Result<
         Some(
             FetchOptions::new()
                 .remote_callbacks(callbacks)
-                .prune(git2::FetchPrune::Off),
+                // We assume an external backup for the base directory.
+                // Therefore it is better to prune and let the backup handle historic values.
+                .prune(git2::FetchPrune::On),
         ),
         None,
     )?;
@@ -105,7 +107,7 @@ fn clone_repo(configuration: Config, user: String, repo: &Repository) -> Result<
 
 #[tracing::instrument(name = "Cloning repositories", skip(repos))]
 async fn clone_repos(configuration: &Config, repos: ListRepoResult) -> Result<()> {
-    let semaphore = Arc::new(Semaphore::new(1));
+    let semaphore = Arc::new(Semaphore::new(5));
     let mut join_handles = Vec::new();
     for repo in repos.repos {
         let permit = semaphore.clone().acquire_owned().await?;
