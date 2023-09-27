@@ -3,10 +3,10 @@ mod telemetry;
 use crate::telemetry::{get_subscriber, init_subscriber};
 use std::{error::Error, path::Path, sync::Arc};
 
+use git2::FetchOptions;
 use octorust::{auth::Credentials, types::Repository, Client, ClientError};
 use secrecy::{ExposeSecret, Secret};
 use tokio::{sync::Semaphore, task::spawn_blocking};
-use url::Url;
 
 #[derive(serde::Deserialize, Debug, Clone)]
 struct Config {
@@ -50,25 +50,33 @@ fn clone_repo(configuration: Config, repo: &Repository) -> Result<(), Box<dyn Er
     let root_dir = Path::new(configuration.directory.as_str());
     let repo_path = root_dir.join(repo.full_name.as_str());
     let git_repo = if repo_path.exists() {
+        tracing::info!("Found existing clone");
         git2::Repository::open(repo_path)?
     } else {
-        git2::Repository::init_bare(repo_path)?
+        tracing::info!("Setting up new clone");
+        let git_repo = git2::Repository::init_bare(repo_path)?;
+        git_repo.remote_with_fetch(
+            "origin",
+            &repo.html_url,
+            "+refs/heads/*:refs/remotes/origin/*",
+        )?;
+        git_repo
     };
+    let mut origin_remote = git_repo.find_remote("origin")?;
+    let mut callbacks = git2::RemoteCallbacks::new();
+    callbacks.credentials(|_url, _username_from_url, _allowed_types| {
+        git2::Cred::userpass_plaintext(
+            "tvh", // FIXME: Get this via the API
+            configuration.token.expose_secret().as_str(),
+        )
+    });
 
-    let mut repo_url = Url::parse(repo.html_url.as_str())?;
-    // FIXME: Get this via the API
-    repo_url
-        .set_username("tvh")
-        .expect("Unable to set username");
-    repo_url
-        .set_password(Some(configuration.token.expose_secret().as_str()))
-        .expect("unable to set password");
-
-    let repo_url = repo_url.as_str();
-
-    git_repo
-        .remote_anonymous(repo_url)?
-        .fetch(&["refs/heads/*:refs/heads/*"], None, None)?;
+    tracing::info!("Doing the fetch");
+    origin_remote.fetch(
+        &["+refs/heads/*:refs/remotes/origin/*"],
+        Some(FetchOptions::new().remote_callbacks(callbacks)),
+        None,
+    )?;
 
     Ok(())
 }
