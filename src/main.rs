@@ -12,10 +12,7 @@ use octorust::{
     Client, ClientError,
 };
 use secrecy::{ExposeSecret, Secret};
-use tokio::{
-    sync::Semaphore,
-    task::{spawn_blocking, JoinSet},
-};
+use tokio::{sync::Semaphore, task::JoinSet};
 
 #[derive(serde::Deserialize, Debug, Clone)]
 struct Config {
@@ -25,9 +22,17 @@ struct Config {
 
 fn get_configuration() -> Result<Config, config::ConfigError> {
     let base_path = std::env::current_dir().expect("Failed to determine the current directory");
-    let settings = config::Config::builder()
-        .add_source(config::File::from(base_path.join("config.json")))
-        .build()?;
+    let mut settings_builder = config::Config::builder();
+    let config_path = base_path.join("config.json");
+    if config_path.exists() {
+        settings_builder = settings_builder.add_source(config::File::from(config_path));
+    }
+    settings_builder = settings_builder.add_source(
+        config::Environment::with_prefix("GITHUB_BACKUP")
+            .prefix_separator("_")
+            .separator("__"),
+    );
+    let settings = settings_builder.build()?;
     settings.try_deserialize::<Config>()
 }
 
