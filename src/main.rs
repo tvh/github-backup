@@ -2,7 +2,7 @@ mod telemetry;
 
 use crate::telemetry::{get_subscriber, init_subscriber};
 
-use std::{ops::Deref, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use git2::FetchOptions;
@@ -66,9 +66,12 @@ async fn list_all_repos(configuration: &Config) -> Result<ListRepoResult, Client
 }
 
 #[tracing::instrument(name = "Cloning repository", skip(repo), fields(repo=repo.full_name))]
-fn clone_repo(configuration: Config, user: String, repo: &Repository) -> Result<()> {
-    let root_dir = shellexpand::full(configuration.directory.as_str())?;
-    let root_dir = Path::new(root_dir.deref());
+fn clone_repo(
+    configuration: Config,
+    user: String,
+    root_dir: &Path,
+    repo: &Repository,
+) -> Result<()> {
     let repo_path = root_dir.join(repo.full_name.as_str());
     let git_repo = if repo_path.exists() {
         tracing::info!("Found existing clone");
@@ -109,12 +112,14 @@ fn clone_repo(configuration: Config, user: String, repo: &Repository) -> Result<
 async fn clone_repos(configuration: &Config, repos: ListRepoResult) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(5));
     let mut join_handles = Vec::new();
+    let root_dir = String::from(shellexpand::full(configuration.directory.as_str())?);
     for repo in repos.repos {
         let permit = semaphore.clone().acquire_owned().await?;
         let configuration = configuration.clone();
         let username = repos.username.clone();
+        let root_dir = Path::new(root_dir.as_str()).to_owned();
         join_handles.push(spawn_blocking(move || {
-            let res = clone_repo(configuration, username, &repo);
+            let res = clone_repo(configuration, username, &root_dir, &repo);
 
             // explicitly own `permit` in the task
             drop(permit);
