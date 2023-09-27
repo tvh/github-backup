@@ -1,7 +1,7 @@
 mod telemetry;
 
 use crate::telemetry::{get_subscriber, init_subscriber};
-use std::{error::Error, path::Path, sync::Arc};
+use std::{error::Error, ops::Deref, path::Path, sync::Arc};
 
 use git2::FetchOptions;
 use octorust::{auth::Credentials, types::Repository, Client, ClientError};
@@ -47,22 +47,23 @@ async fn list_all_repos(configuration: &Config) -> Result<Vec<Repository>, Clien
 
 #[tracing::instrument(name = "Cloning repository", skip(repo), fields(repo=repo.full_name))]
 fn clone_repo(configuration: Config, repo: &Repository) -> Result<(), Box<dyn Error>> {
-    let root_dir = Path::new(configuration.directory.as_str());
+    let root_dir = shellexpand::full(configuration.directory.as_str())?;
+    let root_dir = Path::new(root_dir.deref());
     let repo_path = root_dir.join(repo.full_name.as_str());
     let git_repo = if repo_path.exists() {
         tracing::info!("Found existing clone");
         git2::Repository::open(repo_path)?
     } else {
         tracing::info!("Setting up new clone");
-        let git_repo = git2::Repository::init_bare(repo_path)?;
+        git2::Repository::init_bare(repo_path)?
+    };
+    let mut origin_remote = git_repo.find_remote("origin").or_else(|_e| {
         git_repo.remote_with_fetch(
             "origin",
             &repo.html_url,
             "+refs/heads/*:refs/remotes/origin/*",
-        )?;
-        git_repo
-    };
-    let mut origin_remote = git_repo.find_remote("origin")?;
+        )
+    })?;
     let mut callbacks = git2::RemoteCallbacks::new();
     callbacks.credentials(|_url, _username_from_url, _allowed_types| {
         git2::Cred::userpass_plaintext(
@@ -74,7 +75,11 @@ fn clone_repo(configuration: Config, repo: &Repository) -> Result<(), Box<dyn Er
     tracing::info!("Doing the fetch");
     origin_remote.fetch(
         &["+refs/heads/*:refs/remotes/origin/*"],
-        Some(FetchOptions::new().remote_callbacks(callbacks)),
+        Some(
+            FetchOptions::new()
+                .remote_callbacks(callbacks)
+                .prune(git2::FetchPrune::On),
+        ),
         None,
     )?;
 
@@ -83,7 +88,7 @@ fn clone_repo(configuration: Config, repo: &Repository) -> Result<(), Box<dyn Er
 
 #[tracing::instrument(name = "Cloning repositories", skip(repos))]
 async fn clone_repos(configuration: &Config, repos: Vec<Repository>) -> Result<(), Box<dyn Error>> {
-    let semaphore = Arc::new(Semaphore::new(5));
+    let semaphore = Arc::new(Semaphore::new(1));
     let mut join_handles = Vec::new();
     for repo in repos {
         let permit = semaphore.clone().acquire_owned().await?;
