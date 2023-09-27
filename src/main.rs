@@ -5,10 +5,8 @@ use std::{error::Error, path::Path, sync::Arc};
 
 use octorust::{auth::Credentials, types::Repository, Client, ClientError};
 use secrecy::{ExposeSecret, Secret};
-use tokio::{
-    sync::Semaphore,
-    task::{spawn_blocking, JoinError},
-};
+use tokio::{sync::Semaphore, task::spawn_blocking};
+use url::Url;
 
 #[derive(serde::Deserialize, Debug, Clone)]
 struct Config {
@@ -48,27 +46,36 @@ async fn list_all_repos(configuration: &Config) -> Result<Vec<Repository>, Clien
 }
 
 #[tracing::instrument(name = "Cloning repository", skip(repo), fields(repo=repo.full_name))]
-fn clone_repo(configuration: Config, repo: &Repository) -> Result<(), git2::Error> {
+fn clone_repo(configuration: Config, repo: &Repository) -> Result<(), Box<dyn Error>> {
     let root_dir = Path::new(configuration.directory.as_str());
     let repo_path = root_dir.join(repo.full_name.as_str());
     let git_repo = if repo_path.exists() {
         git2::Repository::open(repo_path)?
     } else {
-        let git_repo = git2::Repository::init_bare(repo_path)?;
-        git_repo.remote_set_url("origin", repo.html_url.as_str())?;
-        git_repo
+        git2::Repository::init_bare(repo_path)?
     };
 
+    let mut repo_url = Url::parse(repo.html_url.as_str())?;
+    // FIXME: Get this via the API
+    repo_url
+        .set_username("tvh")
+        .expect("Unable to set username");
+    repo_url
+        .set_password(Some(configuration.token.expose_secret().as_str()))
+        .expect("unable to set password");
+
+    let repo_url = repo_url.as_str();
+
     git_repo
-        .find_remote("origin")?
-        .fetch(&["+refs/heads/*"], None, None)?;
+        .remote_anonymous(repo_url)?
+        .fetch(&["refs/heads/*:refs/heads/*"], None, None)?;
 
     Ok(())
 }
 
 #[tracing::instrument(name = "Cloning repositories", skip(repos))]
 async fn clone_repos(configuration: &Config, repos: Vec<Repository>) -> Result<(), Box<dyn Error>> {
-    let semaphore = Arc::new(Semaphore::new(10));
+    let semaphore = Arc::new(Semaphore::new(5));
     let mut join_handles = Vec::new();
     for repo in repos {
         let permit = semaphore.clone().acquire_owned().await?;
@@ -79,7 +86,7 @@ async fn clone_repos(configuration: &Config, repos: Vec<Repository>) -> Result<(
             // explicitly own `permit` in the task
             drop(permit);
 
-            res
+            res.map_err(|err| format!("{:?}", err))
         }));
     }
 
