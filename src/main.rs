@@ -12,7 +12,10 @@ use octorust::{
     Client, ClientError,
 };
 use secrecy::{ExposeSecret, Secret};
-use tokio::{sync::Semaphore, task::spawn_blocking};
+use tokio::{
+    sync::Semaphore,
+    task::{spawn_blocking, JoinSet},
+};
 
 #[derive(serde::Deserialize, Debug, Clone)]
 struct Config {
@@ -111,25 +114,25 @@ fn clone_repo(
 #[tracing::instrument(name = "Cloning repositories", skip(repos))]
 async fn clone_repos(configuration: &Config, repos: ListRepoResult) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(5));
-    let mut join_handles = Vec::new();
+    let mut join_set = JoinSet::new();
     let root_dir = String::from(shellexpand::full(configuration.directory.as_str())?);
     for repo in repos.repos {
         let permit = semaphore.clone().acquire_owned().await?;
         let configuration = configuration.clone();
         let username = repos.username.clone();
         let root_dir = Path::new(root_dir.as_str()).to_owned();
-        join_handles.push(spawn_blocking(move || {
+        join_set.spawn_blocking(move || {
             let res = clone_repo(configuration, username, &root_dir, &repo);
 
             // explicitly own `permit` in the task
             drop(permit);
 
             res
-        }));
+        });
     }
 
-    for handle in join_handles {
-        handle.await??;
+    while let Some(res) = join_set.join_next().await {
+        res??;
     }
 
     Ok(())
