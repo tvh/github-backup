@@ -6,7 +6,11 @@ use std::{ops::Deref, path::Path, sync::Arc};
 
 use anyhow::Result;
 use git2::FetchOptions;
-use octorust::{auth::Credentials, types::Repository, Client, ClientError};
+use octorust::{
+    auth::Credentials,
+    types::{Repository, UsersGetByUsernameResponseOneOf},
+    Client, ClientError,
+};
 use secrecy::{ExposeSecret, Secret};
 use tokio::{sync::Semaphore, task::spawn_blocking};
 
@@ -24,12 +28,23 @@ fn get_configuration() -> Result<Config, config::ConfigError> {
     settings.try_deserialize::<Config>()
 }
 
+#[derive(Debug, Clone)]
+struct ListRepoResult {
+    pub repos: Vec<Repository>,
+    pub username: String,
+}
+
 #[tracing::instrument(name = "Fetching all repos for user")]
-async fn list_all_repos(configuration: &Config) -> Result<Vec<Repository>, ClientError> {
+async fn list_all_repos(configuration: &Config) -> Result<ListRepoResult, ClientError> {
     let github = Client::new(
         String::from("tvh/github-backup"),
         Credentials::Token(String::from(configuration.token.expose_secret())),
     )?;
+    let user = github.users().get_authenticated().await?.body;
+    let username = match user {
+        UsersGetByUsernameResponseOneOf::PublicUser(user) => user.login,
+        UsersGetByUsernameResponseOneOf::PrivateUser(user) => user.login,
+    };
     let repos = github
         .repos()
         .list_all_for_authenticated_user(
@@ -44,11 +59,14 @@ async fn list_all_repos(configuration: &Config) -> Result<Vec<Repository>, Clien
         .await?
         .body;
     tracing::info!("Found {} repos", repos.len());
-    Ok(repos)
+    Ok(ListRepoResult {
+        repos: repos,
+        username: username,
+    })
 }
 
 #[tracing::instrument(name = "Cloning repository", skip(repo), fields(repo=repo.full_name))]
-fn clone_repo(configuration: Config, repo: &Repository) -> Result<()> {
+fn clone_repo(configuration: Config, user: String, repo: &Repository) -> Result<()> {
     let root_dir = shellexpand::full(configuration.directory.as_str())?;
     let root_dir = Path::new(root_dir.deref());
     let repo_path = root_dir.join(repo.full_name.as_str());
@@ -68,10 +86,7 @@ fn clone_repo(configuration: Config, repo: &Repository) -> Result<()> {
     })?;
     let mut callbacks = git2::RemoteCallbacks::new();
     callbacks.credentials(|_url, _username_from_url, _allowed_types| {
-        git2::Cred::userpass_plaintext(
-            "tvh", // FIXME: Get this via the API
-            configuration.token.expose_secret().as_str(),
-        )
+        git2::Cred::userpass_plaintext(user.as_str(), configuration.token.expose_secret().as_str())
     });
 
     tracing::info!("Doing the fetch");
@@ -80,7 +95,7 @@ fn clone_repo(configuration: Config, repo: &Repository) -> Result<()> {
         Some(
             FetchOptions::new()
                 .remote_callbacks(callbacks)
-                .prune(git2::FetchPrune::On),
+                .prune(git2::FetchPrune::Off),
         ),
         None,
     )?;
@@ -89,14 +104,15 @@ fn clone_repo(configuration: Config, repo: &Repository) -> Result<()> {
 }
 
 #[tracing::instrument(name = "Cloning repositories", skip(repos))]
-async fn clone_repos(configuration: &Config, repos: Vec<Repository>) -> Result<()> {
+async fn clone_repos(configuration: &Config, repos: ListRepoResult) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(1));
     let mut join_handles = Vec::new();
-    for repo in repos {
+    for repo in repos.repos {
         let permit = semaphore.clone().acquire_owned().await?;
         let configuration = configuration.clone();
+        let username = repos.username.clone();
         join_handles.push(spawn_blocking(move || {
-            let res = clone_repo(configuration, &repo);
+            let res = clone_repo(configuration, username, &repo);
 
             // explicitly own `permit` in the task
             drop(permit);
