@@ -5,6 +5,7 @@ services:
     restart: on-failure:10
     environment:
       - GITHUB_BACKUP_TOKEN=$GITHUB_BACKUP_TOKEN
+      - GITHUB_BACKUP_SCHEDULE=$GITHUB_BACKUP_SCHEDULE
       - GITHUB_BACKUP_DIRECTORY=/backup
     volumes:
       - type: bind

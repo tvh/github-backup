@@ -2,9 +2,11 @@ mod telemetry;
 
 use crate::telemetry::{get_subscriber, init_subscriber};
 
-use std::{path::Path, sync::Arc};
+use std::{path::Path, str::FromStr, sync::Arc};
 
 use anyhow::Result;
+use chrono::{DateTime, Local, TimeZone};
+use cron::Schedule;
 use git2::FetchOptions;
 use octorust::{
     auth::Credentials,
@@ -12,12 +14,28 @@ use octorust::{
     Client, ClientError,
 };
 use secrecy::{ExposeSecret, Secret};
+use serde::Deserialize;
 use tokio::{sync::Semaphore, task::JoinSet};
 
 #[derive(serde::Deserialize, Debug, Clone)]
 struct Config {
     pub token: Secret<String>,
     pub directory: String,
+    #[serde(deserialize_with = "parse_schedule")]
+    pub schedule: Option<Schedule>,
+}
+
+fn parse_schedule<'de, D>(deserializer: D) -> Result<Option<Schedule>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        Some(str) => match Schedule::from_str(str.as_str()) {
+            Ok(schedule) => Ok(Some(schedule)),
+            Err(err) => Err(serde::de::Error::custom(err)),
+        },
+        None => Ok(None),
+    }
 }
 
 fn get_configuration() -> Result<Config, config::ConfigError> {
@@ -143,6 +161,30 @@ async fn clone_repos(configuration: &Config, repos: ListRepoResult) -> Result<()
     Ok(())
 }
 
+#[tracing::instrument]
+async fn run(configuration: &Config) -> Result<()> {
+    let repos = list_all_repos(configuration).await?;
+    clone_repos(configuration, repos).await?;
+    Ok(())
+}
+
+async fn sleep_until<Z: TimeZone>(t: DateTime<Z>) {
+    loop {
+        let now = chrono::Utc::now();
+        let diff = t.clone().signed_duration_since(now);
+        if diff.num_milliseconds() <= 0 {
+            return;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                diff.num_milliseconds()
+                    .try_into()
+                    .expect("failed to convert positive duration"),
+            ))
+            .await;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let subscriber = get_subscriber(
@@ -151,9 +193,25 @@ async fn main() -> Result<()> {
         std::io::stdout,
     );
     init_subscriber(subscriber);
-    let configuration = get_configuration().expect("Failed to read configuration.");
-    let repos = list_all_repos(&configuration).await?;
+    let configuration = get_configuration()?;
 
-    clone_repos(&configuration, repos).await?;
+    match configuration.clone().schedule {
+        None => {
+            tracing::info!("No schedule set, running once");
+            run(&configuration).await?
+        }
+        Some(schedule) => {
+            tracing::info!("Running with schedule: {}", schedule);
+            let upcoming = schedule.upcoming_owned(Local);
+            for t in upcoming {
+                tracing::info!("Sleeping until {}", t);
+                sleep_until(t).await;
+                match run(&configuration).await {
+                    Ok(()) => {}
+                    Err(e) => tracing::error!("Error while running backup: {}", e),
+                }
+            }
+        }
+    }
     Ok(())
 }
