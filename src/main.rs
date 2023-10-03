@@ -155,7 +155,11 @@ async fn clone_repos(configuration: &Config, repos: ListRepoResult) -> Result<()
     }
 
     while let Some(res) = join_set.join_next().await {
-        res??;
+        match res {
+            Ok(Ok(())) => (),
+            Ok(Err(e)) => tracing::error!("{:?}", e),
+            Err(e) => tracing::error!("{:?}", e),
+        }
     }
 
     Ok(())
